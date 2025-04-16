@@ -1,101 +1,92 @@
 package com.example.livechatdemo.data.remote
 
+import android.content.Context
 import com.example.livechatdemo.domain.model.Message
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import org.java_websocket.client.WebSocketClient
 import org.java_websocket.handshake.ServerHandshake
 import org.json.JSONObject
 import java.net.URI
 import javax.inject.Inject
+import javax.inject.Singleton
+import androidx.work.BackoffPolicy
+import androidx.work.Constraints
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import com.example.livechatdemo.data.worker.MessageRetryWorker
+import kotlinx.coroutines.flow.last
+import java.util.concurrent.TimeUnit
 
-class WebSocketClient @Inject constructor() : WebSocketClient(
-    URI("wss://s14465.blr1.piesocket.com/v3/1?api_key=JPQrNpeEViEtk9oHHd8CBaE8F4gAZSQenJIt7kcW&notify_self=true")
-) {
-    private val _messages = MutableSharedFlow<Message>()
+@Singleton
+class WebSocketClient @Inject constructor(
+    @ApplicationContext private val context: Context,
+    private val workManager: WorkManager
+) : WebSocketClient(URI("wss://s14465.blr1.piesocket.com/v3/1?api_key=JPQrNpeEViEtk9oHHd8CBaE8F4gAZSQenJIt7kcW&notify_self=true")) {
+
+    private val _messages = MutableSharedFlow<Message>(replay = 0)
     val messages: SharedFlow<Message> = _messages
 
-    private val _connectionState = MutableSharedFlow<Boolean>()
-    val connectionState: SharedFlow<Boolean> = _connectionState
+    private val _connectionState = MutableStateFlow(false)
+    val connectionState: StateFlow<Boolean> = _connectionState
 
     init {
         connect()
     }
 
     override fun onOpen(handshakedata: ServerHandshake?) {
-        println("WebSocket connected")
-        _connectionState.tryEmit(true)
-        // Send initial message if needed
-        send(JSONObject().apply {
-            put("type", "connection_init")
-        }.toString())
+        println("WebSocket opened: ${handshakedata?.httpStatusMessage}")
+        _connectionState.value = true
     }
 
     override fun onMessage(message: String?) {
-        println("WebSocket received: $message")
-        val msg = Message(
-            id = "remote_${System.currentTimeMillis()}",
-            chatId = "supportBot",
-            content = message?:"",
-            isSent = false,
-            timestamp = System.currentTimeMillis()
-        )
+        println("WebSocket received raw: $message")
         message?.let {
-
             try {
                 val json = JSONObject(it)
-                when (json.getString("type")) {
-                    "chat_message" -> handleChatMessage(json)
-                    else -> handleUnknownMessage(it)
-                }
+                val content = json.optString("content", json.optString("message", it)) // Fallback to "message" or raw string
+                val chatId = json.optString("chatId", "supportBot") // Default to supportBot
+                val msg = Message(
+                    id = json.optString("id", "remote_${System.currentTimeMillis()}"),
+                    chatId = chatId,
+                    content = content,
+                    isSent = false,
+                    timestamp = json.optLong("timestamp", System.currentTimeMillis())
+                )
+                println("Parsed message: id=${msg.id}, chatId=${msg.chatId}, content=${msg.content}")
+                _messages.tryEmit(msg)
             } catch (e: Exception) {
-                handlePlainTextMessage(it)
+                println("Error parsing message: ${e.message}")
+                val msg = Message(
+                    id = "remote_${System.currentTimeMillis()}",
+                    chatId = "supportBot",
+                    content = message,
+                    isSent = false,
+                    timestamp = System.currentTimeMillis()
+                )
+                _messages.tryEmit(msg)
+                println("Parsed messages data ${_messages}")
             }
         }
     }
 
-    private fun handleChatMessage(json: JSONObject) {
-        val message = Message(
-            id = json.optString("id", "remote_${System.currentTimeMillis()}"),
-            chatId = json.optString("chatId", "supportBot"),
-            content = json.getString("content"),
-            isSent = false,
-            timestamp = json.optLong("timestamp", System.currentTimeMillis())
-        )
-        _messages.tryEmit(message)
-    }
-
-    private fun handlePlainTextMessage(text: String) {
-        val message = Message(
-            id = "remote_${System.currentTimeMillis()}",
-            chatId = "supportBot",
-            content = text,
-            isSent = false,
-            timestamp = System.currentTimeMillis()
-        )
-        _messages.tryEmit(message)
-    }
-
-    private fun handleUnknownMessage(text: String) {
-        println("Received unknown message format: $text")
-    }
-
     override fun onClose(code: Int, reason: String?, remote: Boolean) {
-        println("WebSocket closed: $reason (code: $code)")
-        _connectionState.tryEmit(false)
+        println("WebSocket closed: code=$code, reason=$reason, remote=$remote")
+        _connectionState.value = false
+        scheduleRetry()
     }
 
     override fun onError(ex: Exception?) {
         println("WebSocket error: ${ex?.message}")
-        _connectionState.tryEmit(false)
+        _connectionState.value = false
+        scheduleRetry()
     }
 
     fun sendMessage(message: Message) {
-        if (!isOpen) {
-            println("WebSocket not connected, attempting to reconnect")
-            reconnect()
-        }
-
         if (isOpen) {
             try {
                 val jsonMessage = JSONObject().apply {
@@ -104,21 +95,35 @@ class WebSocketClient @Inject constructor() : WebSocketClient(
                     put("content", message.content)
                     put("timestamp", message.timestamp)
                 }
+                println("WebSocket sending: ${jsonMessage.toString()}")
                 send(jsonMessage.toString())
-                println("Message sent successfully: ${message.content}")
             } catch (e: Exception) {
                 println("Failed to send message: ${e.message}")
+                scheduleRetry()
+                throw e
             }
         } else {
-            println("WebSocket still not connected after reconnect attempt")
+            println("WebSocket not connected, queuing message: ${message.content}")
+            scheduleRetry()
+            throw IllegalStateException("WebSocket not connected")
         }
     }
 
-    override fun reconnect() {
-        try {
-            reconnectBlocking()
-        } catch (e: Exception) {
-            println("Reconnection failed: ${e.message}")
-        }
+    private fun scheduleRetry() {
+        println("Scheduling retry with WorkManager")
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .build()
+
+        val workRequest = OneTimeWorkRequestBuilder<MessageRetryWorker>()
+            .setConstraints(constraints)
+            .setBackoffCriteria(
+                BackoffPolicy.EXPONENTIAL,
+                10,
+                TimeUnit.SECONDS
+            )
+            .build()
+
+        workManager.enqueue(workRequest)
     }
 }

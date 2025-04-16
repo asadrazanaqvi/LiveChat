@@ -1,7 +1,6 @@
 package com.example.livechatdemo.presentation.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -9,9 +8,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -38,12 +38,19 @@ import java.util.Locale
 fun ChatScreen(
     viewModel: ChatViewModel = hiltViewModel(),
 ) {
-    val uiState = viewModel.uiState.value
+    val uiState by viewModel.uiState.collectAsState()
+    val selectedChatId by viewModel.selectedChatId.collectAsState()
     var messageText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
 
+    LaunchedEffect(selectedChatId) {
+        println("LaunchedEffect: Loading messages for chatId=$selectedChatId")
+        viewModel.loadMessages(selectedChatId)
+    }
+
     LaunchedEffect(uiState.messages) {
         if (uiState.messages.isNotEmpty()) {
+            println("Scrolling to latest message, count=${uiState.messages.size}")
             listState.animateScrollToItem(uiState.messages.size - 1)
         }
     }
@@ -51,11 +58,12 @@ fun ChatScreen(
     Scaffold(
         topBar = {
             ChatTopAppBar(
-                selectedChatId = viewModel.selectedChatId.value,
+                selectedChatId = selectedChatId,
                 chats = uiState.chats,
                 onChatSelected = { chatId ->
-                    viewModel.loadMessages(chatId)
-                }
+                    viewModel.setSelectedChatId(chatId)
+                },
+                connectionState = uiState.isConnected
             )
         },
         bottomBar = {
@@ -67,7 +75,8 @@ fun ChatScreen(
                         viewModel.sendMessage(messageText)
                         messageText = ""
                     }
-                }
+                },
+                isConnected = uiState.isConnected
             )
         }
     ) { padding ->
@@ -82,19 +91,44 @@ fun ChatScreen(
                         modifier = Modifier.align(Alignment.Center)
                     )
                 }
+
                 uiState.error != null -> {
+                    Column(
+                        modifier = Modifier.align(Alignment.Center),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "Error: ${uiState.error}",
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(16.dp)
+                        )
+                        if (!uiState.isConnected) {
+                            Button(
+                                onClick = {
+                                    viewModel.loadMessages(selectedChatId)
+                                },
+                                modifier = Modifier.padding(8.dp)
+                            ) {
+                                Text("Retry Connection")
+                            }
+                        }
+                    }
+                }
+
+                uiState.chats.isEmpty() -> {
                     Text(
-                        text = "Error: ${uiState.error}",
-                        color = MaterialTheme.colorScheme.error,
+                        text = "No chats available",
                         modifier = Modifier.align(Alignment.Center)
                     )
                 }
+
                 uiState.messages.isEmpty() -> {
                     Text(
-                        text = "No messages yet",
+                        text = if (uiState.isConnected) "No messages yet" else "Connecting...",
                         modifier = Modifier.align(Alignment.Center)
                     )
                 }
+
                 else -> {
                     MessageList(
                         messages = uiState.messages,
@@ -111,16 +145,27 @@ fun ChatScreen(
 fun ChatTopAppBar(
     selectedChatId: String,
     chats: List<Chat>,
-    onChatSelected: (String) -> Unit
+    onChatSelected: (String) -> Unit,
+    connectionState: Boolean
 ) {
     var showChatSelector by remember { mutableStateOf(false) }
 
     TopAppBar(
         title = {
-            Text(
-                text = chats.find { it.id == selectedChatId }?.botName ?: "Chat",
-                style = MaterialTheme.typography.titleLarge
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = chats.find { it.id == selectedChatId }?.botName ?: "Chat",
+                    style = MaterialTheme.typography.titleLarge
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Icon(
+                    imageVector = if (connectionState) Icons.Default.CheckCircle else Icons.Default.Warning,
+                    contentDescription = "Connection status",
+                    tint = if (connectionState) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
         },
         colors = TopAppBarDefaults.topAppBarColors(
             containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -138,6 +183,7 @@ fun ChatTopAppBar(
                     DropdownMenuItem(
                         text = { Text(chat.botName) },
                         onClick = {
+                            println("Chat selected: ${chat.id}")
                             onChatSelected(chat.id)
                             showChatSelector = false
                         }
@@ -147,6 +193,7 @@ fun ChatTopAppBar(
         }
     )
 }
+
 @Composable
 fun MessageList(
     messages: List<Message>,
@@ -160,7 +207,7 @@ fun MessageList(
         verticalArrangement = Arrangement.spacedBy(8.dp),
         contentPadding = PaddingValues(vertical = 16.dp)
     ) {
-        items(messages) { message ->
+        items(messages, key = { it.id }) { message ->
             MessageItem(message = message)
         }
     }
@@ -170,12 +217,12 @@ fun MessageList(
 fun MessageItem(message: Message) {
     val isUserMessage = message.isSent
     val bubbleColor = if (isUserMessage) {
-        MaterialTheme.colorScheme.primary
+        MaterialTheme.colorScheme.primaryContainer
     } else {
         MaterialTheme.colorScheme.surfaceVariant
     }
     val textColor = if (isUserMessage) {
-        MaterialTheme.colorScheme.onPrimary
+        MaterialTheme.colorScheme.onPrimaryContainer
     } else {
         MaterialTheme.colorScheme.onSurface
     }
@@ -186,27 +233,36 @@ fun MessageItem(message: Message) {
             .padding(horizontal = 8.dp, vertical = 4.dp),
         horizontalArrangement = if (isUserMessage) Arrangement.End else Arrangement.Start
     ) {
-        Card(
-            colors = CardDefaults.cardColors(containerColor = bubbleColor),
-            shape = when {
-                isUserMessage -> RoundedCornerShape(16.dp, 0.dp, 16.dp, 16.dp)
-                else -> RoundedCornerShape(0.dp, 16.dp, 16.dp, 16.dp)
-            }
+        Column(
+            horizontalAlignment = if (isUserMessage) Alignment.End else Alignment.Start
         ) {
-            Column(
-                modifier = Modifier.padding(12.dp)
+            Text(
+                text = if (isUserMessage) "You" else "Bot",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+            Card(
+                colors = CardDefaults.cardColors(containerColor = bubbleColor),
+                shape = when {
+                    isUserMessage -> RoundedCornerShape(16.dp, 0.dp, 16.dp, 16.dp)
+                    else -> RoundedCornerShape(0.dp, 16.dp, 16.dp, 16.dp)
+                }
             ) {
-                Text(
-                    text = message.content,
-                    color = textColor,
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                Text(
-                    text = message.timestamp.toTimeFormat(),
-                    color = textColor.copy(alpha = 0.7f),
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.align(Alignment.End)
-                )
+                Column(
+                    modifier = Modifier.padding(12.dp)
+                ) {
+                    Text(
+                        text = message.content,
+                        color = textColor,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = message.timestamp.toTimeFormat(),
+                        color = textColor.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.align(Alignment.End)
+                    )
+                }
             }
         }
     }
@@ -222,103 +278,58 @@ fun Long.toTimeFormat(): String {
 fun MessageInput(
     messageText: String,
     onMessageChange: (String) -> Unit,
-    onSendClick: () -> Unit
+    onSendClick: () -> Unit,
+    isConnected: Boolean
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
         shadowElevation = 4.dp
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            TextField(
-                value = messageText,
-                onValueChange = onMessageChange,
+        Column {
+            if (!isConnected) {
+                Text(
+                    text = "Offline - messages will be sent when connection is restored",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.errorContainer)
+                        .padding(4.dp)
+                )
+            }
+            Row(
                 modifier = Modifier
-                    .weight(1f)
-                    .background(MaterialTheme.colorScheme.surface),
-                placeholder = { Text("Type a message") },
-                colors = TextFieldDefaults.colors(
-                    focusedIndicatorColor = MaterialTheme.colorScheme.primary,
-                    unfocusedIndicatorColor = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            IconButton(
-                onClick = onSendClick,
-                enabled = messageText.isNotBlank()
+                    .fillMaxWidth()
+                    .padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = Icons.Default.Send,
-                    contentDescription = "Send",
-                    tint = if (messageText.isNotBlank()) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant
+                TextField(
+                    value = messageText,
+                    onValueChange = onMessageChange,
+                    modifier = Modifier
+                        .weight(1f)
+                        .background(MaterialTheme.colorScheme.surface),
+                    placeholder = { Text("Type a message") },
+                    colors = TextFieldDefaults.colors(
+                        focusedIndicatorColor = MaterialTheme.colorScheme.primary,
+                        unfocusedIndicatorColor = MaterialTheme.colorScheme.onSurfaceVariant
+                    ),
+                    enabled = true // Always allow typing, queue if offline
                 )
-            }
-        }
-    }
-}
-
-
-@Composable
-fun ChatList(
-    chats: List<Chat>,
-    onChatClick: (String) -> Unit
-) {
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        items(chats) { chat ->
-            ChatItem(chat = chat, onClick = { onChatClick(chat.id) })
-        }
-    }
-}
-
-@Composable
-fun ChatItem(
-    chat: Chat,
-    onClick: () -> Unit
-) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = chat.botName,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = chat.latestMessage,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (chat.isUnread) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            if (chat.isUnread) {
-                Badge(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary
+                Spacer(modifier = Modifier.width(8.dp))
+                IconButton(
+                    onClick = onSendClick,
+                    enabled = messageText.isNotBlank()
                 ) {
-                    Text("New")
+                    Icon(
+                        imageVector = Icons.Default.Send,
+                        contentDescription = "Send",
+                        tint = if (messageText.isNotBlank())
+                            MaterialTheme.colorScheme.primary
+                        else
+                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                    )
                 }
             }
         }

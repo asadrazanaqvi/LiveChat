@@ -2,6 +2,7 @@ package com.example.livechatdemo.di
 
 import android.content.Context
 import androidx.room.Room
+import androidx.work.WorkManager
 import com.example.livechatdemo.data.local.ChatDao
 import com.example.livechatdemo.data.local.ChatDatabase
 import com.example.livechatdemo.data.remote.WebSocketClient
@@ -15,12 +16,12 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
-import okhttp3.OkHttpClient
 import javax.inject.Singleton
 
 @Module
 @InstallIn(SingletonComponent::class)
 object AppModule {
+
     @Provides
     @Singleton
     fun provideChatDatabase(@ApplicationContext context: Context): ChatDatabase {
@@ -33,23 +34,38 @@ object AppModule {
 
     @Provides
     @Singleton
-    fun provideChatDao(database: ChatDatabase) = database.chatDao()
+    fun provideChatDao(database: ChatDatabase): ChatDao = database.chatDao()
 
     @Provides
     @Singleton
-    fun provideWebSocketClient(): WebSocketClient = WebSocketClient()
+    fun provideWorkManager(@ApplicationContext context: Context): WorkManager {
+        return WorkManager.getInstance(context)
+    }
+
+    @Provides
+    @Singleton
+    fun provideWebSocketClient(
+        @ApplicationContext context: Context,
+        workManager: WorkManager
+    ): WebSocketClient {
+        return WebSocketClient(context, workManager)
+    }
 
     @Provides
     @Singleton
     fun provideChatRepository(
         chatDao: ChatDao,
-        webSocketClient: WebSocketClient
-    ): ChatRepository = ChatRepositoryImpl(chatDao, webSocketClient)
+        webSocketClient: WebSocketClient,
+        workManager: WorkManager
+    ): ChatRepository {
+        return ChatRepositoryImpl(chatDao, webSocketClient, workManager)
+    }
 }
 
 @Module
 @InstallIn(SingletonComponent::class)
 object UseCaseModule {
+
     @Provides
     @Singleton
     fun provideGetChatsUseCase(repository: ChatRepository): GetChatsUseCase {
