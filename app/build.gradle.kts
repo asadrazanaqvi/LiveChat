@@ -13,7 +13,7 @@ android {
 
     defaultConfig {
         applicationId = "com.example.livechatdemo"
-        minSdk = 24
+        minSdk = 27
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
@@ -23,7 +23,7 @@ android {
 
             defaultConfig {
                 applicationId = "com.example.livechatdemo"
-                minSdk = 24
+                minSdk = 27
                 targetSdk = 34
                 versionCode = 1
                 versionName = "1.0"
@@ -73,6 +73,9 @@ android {
             implementation(libs.androidx.core.ktx)
             implementation(libs.androidx.lifecycle.runtime.ktx)
             implementation(libs.androidx.activity.compose)
+            implementation("com.google.android.material:material:1.11.0")
+            implementation("org.java-websocket:Java-WebSocket:1.5.6")
+            implementation("androidx.work:work-runtime-ktx:2.9.0")
 
             // Jetpack Compose
             implementation(platform(libs.androidx.compose.bom))
