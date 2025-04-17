@@ -42,8 +42,8 @@ class ChatRepositoryImpl @Inject constructor(
         scope.launch {
             if (chatDao.getChatCount() == 0) {
                 listOf(
-                    ChatEntity("supportBot", "Support Bot", "How can I help?", System.currentTimeMillis(), false),
-                    ChatEntity("salesBot", "Sales Bot", "Check our offers!", System.currentTimeMillis(), false),
+                    //ChatEntity("supportBot", "Support Bot", "How can I help?", System.currentTimeMillis(), false),
+                    //ChatEntity("salesBot", "Sales Bot", "Check our offers!", System.currentTimeMillis(), false),
                     ChatEntity("faqBot", "FAQ Bot", "Common questions", System.currentTimeMillis(), false)
                 ).forEach {
                     println("Inserting default chat: ${it.botName}")
